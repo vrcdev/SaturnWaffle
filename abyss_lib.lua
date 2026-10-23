@@ -2,6 +2,28 @@
 --[[
     local UI = loadstring(game:HttpGet("https://abyss.best/assets/files/gayasf.ui2?key=5y1lxXSfWKhlQkSqhUuFyB8kPp8hsCau"))()
 ]]
+do
+	local _g = getgenv and getgenv() or _G
+	pcall(function()
+		if type(_g.Library) == "table" and type(_g.Library.SelfDestruct) == "function" then
+			_g.Library.SelfDestruct()
+		end
+	end)
+	if getgc then
+		pcall(function()
+			for _, v in ipairs(getgc(true)) do
+				if type(v) == "table" and rawget(v, "Drawings") and rawget(v, "SelfDestruct") then
+					pcall(v.SelfDestruct)
+				end
+			end
+		end)
+	end
+	pcall(function()
+		for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
+			if g.Name == "AbyssInput" then g:Destroy() end
+		end
+	end)
+end
 -- // Library Init \\ --
 local Start = tick()
 local LoadTime = tick()
@@ -20,6 +42,7 @@ local Camera = Workspace.CurrentCamera
 local HttpService = Secure.HttpService
 local Mouse = LocalPlayer:GetMouse()
 local InputGUI = Instance.new("ScreenGui", CoreGui)
+InputGUI.Name = "AbyssInput"
 -- local Stats = Secure.Stats.Network.ServerStatsItem["Data Ping"] 
 --
 -- Aimware = {6, [[{"Outline":"000005","Accent":"c82828","LightText":"e8e8e8","DarkText":"afafaf","LightContrast":"2b2b2b","CursorOutline":"191919","DarkContrast":"191919","TextBorder":"0a0a0a","Inline":"373737"}]]},
