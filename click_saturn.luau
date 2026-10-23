@@ -418,10 +418,11 @@ if M.playerCam then
 		wrapImpulseOn(M.playerCam, n)
 	end
 end
+local NOISY_SENDS = {repKeys = true, repUpdate = true, _ping = true, repManualDeploy = true}
 if M.netClient and type(M.netClient.send) == "function" then
 	local origSend = M.netClient.send
 	local function wrappedSend(name, ...)
-		if flag("shot_debug", false) then
+		if flag("shot_debug", false) and not NOISY_SENDS[name] then
 			local a = {...}
 			local t = {}
 			for i, v in ipairs(a) do t[i] = typeof(v)..":"..tostring(v) end
@@ -434,7 +435,7 @@ if M.netClient and type(M.netClient.send) == "function" then
 	if type(M.netClient.sendUnreliable) == "function" then
 		local origU = M.netClient.sendUnreliable
 		M.netClient.sendUnreliable = function(name, ...)
-			if flag("shot_debug", false) then warn("[sw] sendU", tostring(name)) end
+			if flag("shot_debug", false) and not NOISY_SENDS[name] then warn("[sw] sendU", tostring(name)) end
 			return origU(name, ...)
 		end
 		cleanup.restore[#cleanup.restore+1] = function() M.netClient.sendUnreliable = origU end
