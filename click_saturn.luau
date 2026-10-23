@@ -461,6 +461,22 @@ if M.netClient and type(M.netClient.send) == "function" then
 			for i, v in ipairs(a) do t[i] = typeof(v)..":"..tostring(v) end
 			warn("[sw] send", tostring(name), "->", table.concat(t, " | "))
 		end
+		if name == "repShoot" and flag("aim_on", false) and lastTgt then
+			local hitPos = lastTgt.part and lastTgt.part.Position or lastTgt.pos
+			local a = {...}
+			local oi, di = nil, nil
+			for i, v in ipairs(a) do
+				if typeof(v) == "Vector3" then
+					if not oi then oi = i
+					elseif not di then di = i break end
+				end
+			end
+			if di and a[oi] and hitPos then
+				a[di] = (hitPos - a[oi]).Unit * math.max(a[di].Magnitude, 1e-6)
+				if flag("shot_debug", false) then warn("[sw] repShoot redirected ->", hitPos) end
+				return origSend(name, table.unpack(a))
+			end
+		end
 		return origSend(name, ...)
 	end
 	M.netClient.send = wrappedSend
