@@ -16,6 +16,9 @@ local function wrapMethod(tbl, fname, fn)
 	cleanup.restore[#cleanup.restore+1] = function() tbl[fname] = orig end
 	return orig
 end
+pcall(function()
+	if Library and Library.SelfDestruct then Library.SelfDestruct() end
+end)
 local players = game:GetService("Players")
 local run     = game:GetService("RunService")
 local uis     = game:GetService("UserInputService")
@@ -472,6 +475,13 @@ if M.netClient and type(M.netClient.send) == "function" then
 				end
 			end
 			if di and a[oi] and hitPos then
+				local dist = (hitPos - a[oi]).Magnitude
+				local mv = 1000
+				local fo = getFirearm()
+				local st = fo and fo._data and fo._data.stats
+				if st and type(st["Muzzle Velocity"]) == "number" then mv = st["Muzzle Velocity"] end
+				local t = dist / math.max(mv, 1)
+				hitPos = hitPos + Vector3.new(0, 0.5 * workspace.Gravity * t * t, 0)
 				a[di] = (hitPos - a[oi]).Unit * math.max(a[di].Magnitude, 1e-6)
 				if flag("shot_debug", false) then warn("[sw] repShoot redirected ->", hitPos) end
 				return origSend(name, table.unpack(a))
@@ -579,6 +589,31 @@ local fovCircle = Drawing.new("Circle")
 fovCircle.Thickness = 1 fovCircle.Filled = false fovCircle.Visible = false fovCircle.Color = Color3.new(1,1,1)
 cleanup.draws[#cleanup.draws+1] = fovCircle
 
+local camAimCur = nil
+local function applyCamAim()
+	if not (flag("cam_aim", false) and camHeld) then camAimCur = nil return end
+	local tgt = pickTarget()
+	if not tgt then return end
+	local cam = workspace.CurrentCamera
+	local hitPos = tgt.part and tgt.part.Position or tgt.pos
+	local want = CFrame.lookAt(cam.CFrame.Position, hitPos)
+	local sm = math.clamp(flag("cam_smooth", 0.25), 0.02, 1)
+	camAimCur = camAimCur and camAimCur:Lerp(want, sm) or want
+	cam.CFrame = camAimCur
+	if M.cameraI then
+		pcall(function()
+			if typeof(M.cameraI._render) == "CFrame" then M.cameraI._render = camAimCur end
+		end)
+	end
+end
+wrapMethod(M.cameraI, "step", function(orig)
+	return function(...)
+		local r = {orig(...)}
+		pcall(applyCamAim)
+		return table.unpack(r)
+	end
+end)
+
 local maintT = 0
 cleanup.conns[#cleanup.conns+1] = run.RenderStepped:Connect(function(dt)
 	local cam = workspace.CurrentCamera
@@ -600,22 +635,8 @@ cleanup.conns[#cleanup.conns+1] = run.RenderStepped:Connect(function(dt)
 		end
 	end
 
-	-- camera aim
-	if flag("cam_aim", false) and camHeld then
-		local tgt = pickTarget()
-		if tgt then
-			local hitPos = tgt.part and tgt.part.Position or tgt.pos
-			local want = CFrame.lookAt(cam.CFrame.Position, hitPos)
-			local sm = flag("cam_smooth", 0.25)
-			local co = getCamObj()
-			if co and type(co.setCFrame) == "function" then
-				pcall(function()
-					co:setCFrame(co.current and co.current.CFrame and co.current.CFrame:Lerp(want, sm) or want)
-				end)
-			end
-			cam.CFrame = cam.CFrame:Lerp(want, sm)
-		end
-	end
+	-- camera aim (post-step wrap does the work; this catches engines that skip cameraI.step)
+	pcall(applyCamAim)
 
 	-- esp
 	if flag("esp_on", false) then
@@ -726,6 +747,7 @@ end)
 
 ---------------------------------------------------------------- ui
 
+local Controls = {}
 local Window = Library.Window("waffle // saturn", Vector2.new(540, 620))
 pcall(function() Window.Watermark("waffle") end)
 pcall(function() Window.ChangeAnime("Astolfo") end)
@@ -733,32 +755,32 @@ pcall(function() Window.ToggleAnime(false) end)
 
 local combat = Window:Tab("combat")
 local aimSec = combat:Section("silent aim", "Left")
-aimSec:Toggle({Title = "enabled", Flag = "aim_on", Default = false})
-aimSec:Dropdown({Title = "aim part", Flag = "aim_part", List = {"head","torso","root","closest"}, Default = "head"})
-aimSec:Slider({Title = "fov", Flag = "aim_fov", Min = 20, Max = 600, Default = 150, Decimals = 1})
-aimSec:Slider({Title = "hit chance", Flag = "aim_chance", Min = 1, Max = 100, Default = 100, Decimals = 1})
-aimSec:Slider({Title = "max dist", Flag = "aim_maxdist", Min = 50, Max = 2000, Default = 500, Decimals = 1})
-aimSec:Toggle({Title = "wall check", Flag = "aim_wallcheck", Default = true})
-aimSec:Toggle({Title = "team check", Flag = "aim_team", Default = true})
-aimSec:Toggle({Title = "shot debug", Flag = "shot_debug", Default = false})
+Controls.aim_on = aimSec:Toggle({Title = "enabled", Flag = "aim_on", Default = false})
+Controls.aim_part = aimSec:Dropdown({Title = "aim part", Flag = "aim_part", List = {"head","torso","root","closest"}, Default = "head"})
+Controls.aim_fov = aimSec:Slider({Title = "fov", Flag = "aim_fov", Min = 20, Max = 600, Default = 150, Decimals = 1})
+Controls.aim_chance = aimSec:Slider({Title = "hit chance", Flag = "aim_chance", Min = 1, Max = 100, Default = 100, Decimals = 1})
+Controls.aim_maxdist = aimSec:Slider({Title = "max dist", Flag = "aim_maxdist", Min = 50, Max = 2000, Default = 500, Decimals = 1})
+Controls.aim_wallcheck = aimSec:Toggle({Title = "wall check", Flag = "aim_wallcheck", Default = true})
+Controls.aim_team = aimSec:Toggle({Title = "team check", Flag = "aim_team", Default = true})
+Controls.shot_debug = aimSec:Toggle({Title = "shot debug", Flag = "shot_debug", Default = false})
 
 local camSec = combat:Section("camera aim", "Right")
-camSec:Toggle({Title = "enabled (hold key)", Flag = "cam_aim", Default = false})
-camSec:Dropdown({Title = "key", Flag = "cam_key", List = {"M2","M1","Q","E","X","CapsLock"}, Default = "M2"})
-camSec:Slider({Title = "smoothing", Flag = "cam_smooth", Min = 0.05, Max = 1, Default = 0.25, Decimals = 100})
+Controls.cam_aim = camSec:Toggle({Title = "enabled (hold key)", Flag = "cam_aim", Default = false})
+Controls.cam_key = camSec:Dropdown({Title = "key", Flag = "cam_key", List = {"M2","M1","Q","E","X","CapsLock"}, Default = "M2"})
+Controls.cam_smooth = camSec:Slider({Title = "smoothing", Flag = "cam_smooth", Min = 0.05, Max = 1, Default = 0.25, Decimals = 100})
 
 local gunTab = Window:Tab("weapon")
 local gunSec = gunTab:Section("firearm", "Left")
-gunSec:Toggle({Title = "rapid fire", Flag = "rf_on", Default = false})
-gunSec:Slider({Title = "fire rate mult", Flag = "rf_mult", Min = 1, Max = 4, Default = 1, Decimals = 100})
-gunSec:Toggle({Title = "no spread", Flag = "no_spread", Default = false})
-gunSec:Toggle({Title = "no recoil", Flag = "no_recoil", Default = false})
-gunSec:Toggle({Title = "infinite ammo", Flag = "inf_ammo", Default = false})
-gunSec:Toggle({Title = "fast reload", Flag = "fast_reload", Default = false})
-gunSec:Slider({Title = "reload mult", Flag = "fr_mult", Min = 0.05, Max = 1, Default = 0.5, Decimals = 100})
+Controls.rf_on = gunSec:Toggle({Title = "rapid fire", Flag = "rf_on", Default = false})
+Controls.rf_mult = gunSec:Slider({Title = "fire rate mult", Flag = "rf_mult", Min = 1, Max = 4, Default = 1, Decimals = 100})
+Controls.no_spread = gunSec:Toggle({Title = "no spread", Flag = "no_spread", Default = false})
+Controls.no_recoil = gunSec:Toggle({Title = "no recoil", Flag = "no_recoil", Default = false})
+Controls.inf_ammo = gunSec:Toggle({Title = "infinite ammo", Flag = "inf_ammo", Default = false})
+Controls.fast_reload = gunSec:Toggle({Title = "fast reload", Flag = "fast_reload", Default = false})
+Controls.fr_mult = gunSec:Slider({Title = "reload mult", Flag = "fr_mult", Min = 0.05, Max = 1, Default = 0.5, Decimals = 100})
 
 local miscSec = gunTab:Section("deploy", "Right")
-miscSec:Toggle({Title = "auto deploy", Flag = "auto_deploy", Default = false})
+Controls.auto_deploy = miscSec:Toggle({Title = "auto deploy", Flag = "auto_deploy", Default = false})
 miscSec:Button({Title = "deploy now", Callback = function()
 	if M.netClient then
 		local ok, err = pcall(M.netClient.send, "repDeploy")
@@ -775,22 +797,54 @@ end})
 
 local vis = Window:Tab("visuals")
 local espSec = vis:Section("esp", "Left")
-espSec:Toggle({Title = "enabled", Flag = "esp_on", Default = false})
-espSec:Toggle({Title = "names", Flag = "esp_name", Default = true})
-espSec:Toggle({Title = "boxes", Flag = "esp_box", Default = true})
-espSec:Toggle({Title = "health", Flag = "esp_health", Default = true})
-espSec:Toggle({Title = "distance", Flag = "esp_dist", Default = true})
-espSec:Toggle({Title = "skeleton", Flag = "esp_skeleton", Default = false})
-espSec:Toggle({Title = "chams", Flag = "esp_chams", Default = false})
-espSec:Toggle({Title = "hide friendly", Flag = "esp_teamcheck", Default = false})
-espSec:Toggle({Title = "visible only", Flag = "esp_visible_only", Default = false})
-espSec:Slider({Title = "max dist", Flag = "esp_max", Min = 100, Max = 5000, Default = 2000, Decimals = 1})
+Controls.esp_on = espSec:Toggle({Title = "enabled", Flag = "esp_on", Default = false})
+Controls.esp_name = espSec:Toggle({Title = "names", Flag = "esp_name", Default = true})
+Controls.esp_box = espSec:Toggle({Title = "boxes", Flag = "esp_box", Default = true})
+Controls.esp_health = espSec:Toggle({Title = "health", Flag = "esp_health", Default = true})
+Controls.esp_dist = espSec:Toggle({Title = "distance", Flag = "esp_dist", Default = true})
+Controls.esp_skeleton = espSec:Toggle({Title = "skeleton", Flag = "esp_skeleton", Default = false})
+Controls.esp_chams = espSec:Toggle({Title = "chams", Flag = "esp_chams", Default = false})
+Controls.esp_teamcheck = espSec:Toggle({Title = "hide friendly", Flag = "esp_teamcheck", Default = false})
+Controls.esp_visible_only = espSec:Toggle({Title = "visible only", Flag = "esp_visible_only", Default = false})
+Controls.esp_max = espSec:Slider({Title = "max dist", Flag = "esp_max", Min = 100, Max = 5000, Default = 2000, Decimals = 1})
 
-Window:AddSettingsTab()
+local http = game:GetService("HttpService")
+local cfgPath = "Abyss/Configs/" .. tostring(game.PlaceId) .. "/saturn.json"
+local function saveConfig()
+	local snap = {}
+	for k, v in pairs(Library.Flags) do
+		local t = type(v)
+		if t == "number" or t == "boolean" or t == "string" then snap[k] = v end
+	end
+	local ok, err = pcall(writefile, cfgPath, http:JSONEncode(snap))
+	warn("[sw] config save ->", ok, err)
+end
+local function loadConfig()
+	local ok, src = pcall(readfile, cfgPath)
+	if not ok or type(src) ~= "string" then return false end
+	local ok2, data = pcall(http.JSONDecode, http, src)
+	if not ok2 or type(data) ~= "table" then return false end
+	for k, v in pairs(data) do
+		Library.Flags[k] = v
+		local c = Controls[k]
+		if c and type(c.Set) == "function" then pcall(function() c:Set(v) end) end
+	end
+	return true
+end
+
+local Settings = Window:AddSettingsTab(function() pcall(G._SW_CLEANUP) end)
+local cfgSec = Settings:Section("config", "Left")
+cfgSec:Button({Title = "save config", Callback = saveConfig})
+cfgSec:Button({Title = "load config", Callback = function() warn("[sw] config load ->", loadConfig()) end})
+
+task.delay(0.3, function()
+	if loadConfig() then warn("[sw] config auto-loaded") end
+end)
 
 if type(Library.SelfDestruct) == "function" then
 	local origSD = Library.SelfDestruct
 	Library.SelfDestruct = function(...)
+		pcall(saveConfig)
 		pcall(G._SW_CLEANUP)
 		return origSD(...)
 	end
