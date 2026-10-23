@@ -841,6 +841,8 @@ task.delay(0.3, function()
 	if loadConfig() then warn("[sw] config auto-loaded") end
 end)
 
+pcall(function() Window:SwitchTab(combat) end)
+
 if type(Library.SelfDestruct) == "function" then
 	local origSD = Library.SelfDestruct
 	Library.SelfDestruct = function(...)
