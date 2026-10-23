@@ -850,11 +850,18 @@ cleanup.conns[#cleanup.conns+1] = uis.InputBegan:Connect(function(i, gpe)
 end)
 
 if type(Library.SelfDestruct) == "function" then
-	local origSD = Library.SelfDestruct
-	Library.SelfDestruct = function(...)
+	G._SW_SD = G._SW_SD or {}
+	if Library.SelfDestruct ~= G._SW_SD.fn then
+		G._SW_ORIG_SD = Library.SelfDestruct
+	end
+	local origSD = G._SW_ORIG_SD
+	local w = function(...)
 		pcall(saveConfig)
 		pcall(G._SW_CLEANUP)
 		return origSD(...)
 	end
+	G._SW_SD.fn = w
+	Library.SelfDestruct = w
+	cleanup.restore[#cleanup.restore+1] = function() Library.SelfDestruct = origSD end
 end
 warn(string.format("[sw] up — modules: %d | firearm: %s", (function() local n=0 for k,v in pairs(M) do if v then n=n+1 end end return n end)(), tostring(getFirearm() ~= nil)))
