@@ -321,34 +321,13 @@ end
 
 local lastShot = nil
 local lastTgt = nil
+local armT = 0
+local pinList = {}
 local function setCamAll(cf)
-	local undo = {}
 	local cam = workspace.CurrentCamera
 	local old = cam.CFrame
 	cam.CFrame = cf
-	undo[#undo+1] = function() cam.CFrame = old end
-	if M.cameraI then
-		local cur = M.cameraI.current
-		if type(cur) == "table" then
-			for k, v in pairs(cur) do
-				if typeof(v) == "CFrame" then
-					local o = v
-					cur[k] = cf
-					undo[#undo+1] = function() cur[k] = o end
-				end
-			end
-		end
-		if typeof(M.cameraI._render) == "CFrame" then
-			local o = M.cameraI._render
-			M.cameraI._render = cf
-			undo[#undo+1] = function() M.cameraI._render = o end
-		end
-	end
-	local co = getCamObj()
-	if co and type(co.setCFrame) == "function" then
-		pcall(function() co:setCFrame(cf) end)
-	end
-	return function() for _, u in ipairs(undo) do pcall(u) end end
+	return function() cam.CFrame = old end
 end
 
 wrapMethod(M.firearm, "shoot", function(origShoot)
@@ -366,6 +345,7 @@ wrapMethod(M.firearm, "shoot", function(origShoot)
 			undo()
 			lastShot = {t = tick(), pos = hitPos}
 			lastTgt = tgt
+			armT = tick()
 			if not ok then warn("[sw] shoot err:", err) end
 			return
 		end
@@ -386,16 +366,69 @@ wrapMethod(M.hitDet, "playerHitCheck", function(origHC)
 			local oi, di = nil, nil
 			for i, v in ipairs(a) do
 				if typeof(v) == "Vector3" then
-					if not oi and (v - workspace.CurrentCamera.CFrame.Position).Magnitude < 20 then oi = i
-					elseif oi then di = i break end
+					if not oi then oi = i
+					elseif not di then di = i break end
 				end
 			end
 			if di then
-				a[di] = (hitPos - a[oi]).Unit * a[di].Magnitude
+				local seg = a[di] - a[oi]
+				local step = seg.Magnitude
+				a[di] = a[oi] + (hitPos - a[oi]).Unit * step
 				if flag("shot_debug", false) then warn("[sw] hitCheck redirected") end
 			end
 		end
 		return origHC(table.unpack(a))
+	end
+end)
+
+local hitHandler = reqmod("HitDetectionHandler")
+wrapMethod(hitHandler, "onPlayerHit", function(orig)
+	return function(...)
+		local a = {...}
+		if flag("shot_debug", false) then
+			local t = {}
+			for i, v in ipairs(a) do t[i] = typeof(v)..":"..tostring(v) end
+			warn("[sw] onPlayerHit args:", table.concat(t, " | "))
+		end
+		return orig(table.unpack(a))
+	end
+end)
+
+cleanup.conns[#cleanup.conns+1] = workspace.DescendantAdded:Connect(function(obj)
+	if not flag("aim_on", false) then return end
+	if tick() - armT > 0.6 then return end
+	if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
+	task.defer(function()
+		if not obj.Parent then return end
+		local part = obj:IsA("BasePart") and obj
+			or (obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)))
+		if not part or part.Anchored then return end
+		local sz = part.Size
+		if sz.X > 12 or sz.Y > 12 or sz.Z > 12 then return end
+		local char = lp.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local from = root and root.Position or workspace.CurrentCamera.CFrame.Position
+		if (part.Position - from).Magnitude > 80 then return end
+		if obj:IsA("Model") and obj:FindFirstChildWhichIsA("Humanoid") then return end
+		local tgt = lastTgt
+		if not tgt then return end
+		local hitPos = tgt.part and tgt.part.Position or tgt.pos
+		if flag("shot_debug", false) then warn("[sw] proj redirect ->", obj:GetFullName()) end
+		pinList[obj] = {t = tick(), pos = hitPos, part = part}
+	end)
+end)
+cleanup.conns[#cleanup.conns+1] = run.Heartbeat:Connect(function()
+	for obj, info in pairs(pinList) do
+		if tick() - info.t > 0.15 or not obj.Parent then
+			pinList[obj] = nil
+		else
+			local p = info.part
+			if p and p.Parent and not p.Anchored then
+				if obj:IsA("Model") then pcall(function() obj:PivotTo(CFrame.new(info.pos)) end)
+				else pcall(function() p.CFrame = CFrame.new(info.pos) end) end
+				pcall(function() p.AssemblyLinearVelocity = Vector3.zero end)
+			end
+		end
 	end
 end)
 
@@ -447,7 +480,14 @@ if recoilSprings then
 	for _, n in ipairs({"applyImpulse", "updateRecoilParameters", "setVectorParameters"}) do
 		wrapMethod(recoilSprings, n, function(orig)
 			return function(self, ...)
-				if flag("no_recoil", false) and n == "applyImpulse" then return end
+				if flag("no_recoil", false) and n == "applyImpulse" then
+					local a = {...}
+					for i, v in ipairs(a) do
+						if typeof(v) == "Vector3" then a[i] = Vector3.zero
+						elseif type(v) == "number" then a[i] = 0 end
+					end
+					return orig(self, table.unpack(a))
+				end
 				return orig(self, ...)
 			end
 		end)
@@ -731,4 +771,12 @@ espSec:Toggle({Title = "visible only", Flag = "esp_visible_only", Default = fals
 espSec:Slider({Title = "max dist", Flag = "esp_max", Min = 100, Max = 5000, Default = 2000, Decimals = 1})
 
 Window:AddSettingsTab()
+
+if type(Library.SelfDestruct) == "function" then
+	local origSD = Library.SelfDestruct
+	Library.SelfDestruct = function(...)
+		pcall(G._SW_CLEANUP)
+		return origSD(...)
+	end
+end
 warn(string.format("[sw] up — modules: %d | firearm: %s", (function() local n=0 for k,v in pairs(M) do if v then n=n+1 end end return n end)(), tostring(getFirearm() ~= nil)))
