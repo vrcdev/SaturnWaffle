@@ -843,6 +843,12 @@ end)
 
 pcall(function() Window:SwitchTab(combat) end)
 
+cleanup.conns[#cleanup.conns+1] = uis.InputBegan:Connect(function(i, gpe)
+	if not gpe and i.KeyCode == Enum.KeyCode.End then
+		pcall(function() Library.SelfDestruct() end)
+	end
+end)
+
 if type(Library.SelfDestruct) == "function" then
 	local origSD = Library.SelfDestruct
 	Library.SelfDestruct = function(...)
