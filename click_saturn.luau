@@ -1,4 +1,21 @@
 -- saturnwaffle // openCoR
+local G = getgenv and getgenv() or _G
+if type(G._SW_CLEANUP) == "function" then pcall(G._SW_CLEANUP) end
+local cleanup = {conns = {}, draws = {}, insts = {}, restore = {}}
+G._SW_CLEANUP = function()
+	for _, r in ipairs(cleanup.restore) do pcall(r) end
+	for _, c in ipairs(cleanup.conns) do pcall(function() c:Disconnect() end) end
+	for _, d in ipairs(cleanup.draws) do pcall(function() d:Remove() end) end
+	for _, d in ipairs(cleanup.draws) do pcall(function() d:Destroy() end) end
+	for _, i in ipairs(cleanup.insts) do pcall(function() i:Destroy() end) end
+end
+local function wrapMethod(tbl, fname, fn)
+	if not tbl or type(tbl[fname]) ~= "function" then return nil end
+	local orig = tbl[fname]
+	tbl[fname] = fn(orig)
+	cleanup.restore[#cleanup.restore+1] = function() tbl[fname] = orig end
+	return orig
+end
 local players = game:GetService("Players")
 local run     = game:GetService("RunService")
 local uis     = game:GetService("UserInputService")
@@ -303,9 +320,39 @@ end
 ---------------------------------------------------------------- shot hook (silent aim)
 
 local lastShot = nil
-if M.firearm and type(M.firearm.shoot) == "function" then
-	local origShoot = M.firearm.shoot
-	M.firearm.shoot = function(self, ...)
+local lastTgt = nil
+local function setCamAll(cf)
+	local undo = {}
+	local cam = workspace.CurrentCamera
+	local old = cam.CFrame
+	cam.CFrame = cf
+	undo[#undo+1] = function() cam.CFrame = old end
+	if M.cameraI then
+		local cur = M.cameraI.current
+		if type(cur) == "table" then
+			for k, v in pairs(cur) do
+				if typeof(v) == "CFrame" then
+					local o = v
+					cur[k] = cf
+					undo[#undo+1] = function() cur[k] = o end
+				end
+			end
+		end
+		if typeof(M.cameraI._render) == "CFrame" then
+			local o = M.cameraI._render
+			M.cameraI._render = cf
+			undo[#undo+1] = function() M.cameraI._render = o end
+		end
+	end
+	local co = getCamObj()
+	if co and type(co.setCFrame) == "function" then
+		pcall(function() co:setCFrame(cf) end)
+	end
+	return function() for _, u in ipairs(undo) do pcall(u) end end
+end
+
+wrapMethod(M.firearm, "shoot", function(origShoot)
+	return function(self, ...)
 		local tgt = nil
 		if flag("aim_on", false) and math.random(1, 100) <= flag("aim_chance", 100) then
 			tgt = pickTarget()
@@ -314,32 +361,96 @@ if M.firearm and type(M.firearm.shoot) == "function" then
 			local hitPos = tgt.part and tgt.part.Position or tgt.pos
 			if flag("shot_debug", false) then warn("[sw] lock ->", tgt.plr and tgt.plr.Name, hitPos) end
 			local cam = workspace.CurrentCamera
-			local undo = flipCam(CFrame.lookAt(cam.CFrame.Position, hitPos))
+			local undo = setCamAll(CFrame.lookAt(cam.CFrame.Position, hitPos))
 			local ok, err = pcall(origShoot, self, ...)
 			undo()
 			lastShot = {t = tick(), pos = hitPos}
+			lastTgt = tgt
 			if not ok then warn("[sw] shoot err:", err) end
 			return
 		end
 		return origShoot(self, ...)
 	end
-end
+end)
+
+wrapMethod(M.hitDet, "playerHitCheck", function(origHC)
+	return function(...)
+		local a = {...}
+		if flag("shot_debug", false) then
+			local t = {}
+			for i, v in ipairs(a) do t[i] = typeof(v)..":"..tostring(v) end
+			warn("[sw] hitCheck args:", table.concat(t, " | "))
+		end
+		if flag("aim_on", false) and lastTgt and tick() - (lastShot and lastShot.t or 0) < 0.5 then
+			local hitPos = lastTgt.part and lastTgt.part.Position or lastTgt.pos
+			local oi, di = nil, nil
+			for i, v in ipairs(a) do
+				if typeof(v) == "Vector3" then
+					if not oi and (v - workspace.CurrentCamera.CFrame.Position).Magnitude < 20 then oi = i
+					elseif oi then di = i break end
+				end
+			end
+			if di then
+				a[di] = (hitPos - a[oi]).Unit * a[di].Magnitude
+				if flag("shot_debug", false) then warn("[sw] hitCheck redirected") end
+			end
+		end
+		return origHC(table.unpack(a))
+	end
+end)
 
 ---------------------------------------------------------------- recoil hooks (camera-side shove)
 
-if M.playerCam then
-	local function wrapImpulse(fname)
-		local orig = M.playerCam[fname]
-		if type(orig) ~= "function" then return end
-		M.playerCam[fname] = function(self, a, ...)
+local function wrapImpulseOn(tbl, fname)
+	wrapMethod(tbl, fname, function(orig)
+		return function(self, a, ...)
 			if flag("no_recoil", false) then
-				if type(a) == "number" then a = a * 0 end
+				if type(a) == "number" then a = 0 end
 				if typeof(a) == "Vector3" then a = Vector3.zero end
+				if typeof(a) == "Vector2" then a = Vector2.zero end
 			end
 			return orig(self, a, ...)
 		end
+	end)
+end
+if M.playerCam then
+	for _, n in ipairs({"shove", "applyImpulse", "setBodyRecoil", "setHeadRecoil", "setRecoilAiming"}) do
+		wrapImpulseOn(M.playerCam, n)
 	end
-	for _, n in ipairs({"shove", "applyImpulse", "setBodyRecoil", "setHeadRecoil"}) do wrapImpulse(n) end
+end
+if M.netClient and type(M.netClient.send) == "function" then
+	local origSend = M.netClient.send
+	local function wrappedSend(name, ...)
+		if flag("shot_debug", false) then
+			local a = {...}
+			local t = {}
+			for i, v in ipairs(a) do t[i] = typeof(v)..":"..tostring(v) end
+			warn("[sw] send", tostring(name), "->", table.concat(t, " | "))
+		end
+		return origSend(name, ...)
+	end
+	M.netClient.send = wrappedSend
+	cleanup.restore[#cleanup.restore+1] = function() M.netClient.send = origSend end
+	if type(M.netClient.sendUnreliable) == "function" then
+		local origU = M.netClient.sendUnreliable
+		M.netClient.sendUnreliable = function(name, ...)
+			if flag("shot_debug", false) then warn("[sw] sendU", tostring(name)) end
+			return origU(name, ...)
+		end
+		cleanup.restore[#cleanup.restore+1] = function() M.netClient.sendUnreliable = origU end
+	end
+end
+
+local recoilSprings = reqmod("RecoilSprings")
+if recoilSprings then
+	for _, n in ipairs({"applyImpulse", "updateRecoilParameters", "setVectorParameters"}) do
+		wrapMethod(recoilSprings, n, function(orig)
+			return function(self, ...)
+				if flag("no_recoil", false) and n == "applyImpulse" then return end
+				return orig(self, ...)
+			end
+		end)
+	end
 end
 
 ---------------------------------------------------------------- esp
@@ -349,7 +460,7 @@ local function espFor(p)
 	local e = espPool[p]
 	if e then return e end
 	e = {}
-	local function dr(t) local d = Drawing.new(t) d.Visible = false return d end
+	local function dr(t) local d = Drawing.new(t) d.Visible = false cleanup.draws[#cleanup.draws+1] = d return d end
 	e.box    = dr("Square")
 	e.name   = dr("Text")   e.name.Center = true e.name.Outline = true e.name.Size = 13
 	e.health = dr("Text")   e.health.Center = true e.health.Outline = true e.health.Size = 12
@@ -363,7 +474,7 @@ local function hideEsp(e)
 	e.box.Visible = false e.name.Visible = false e.health.Visible = false e.dist.Visible = false
 	for _, l in ipairs(e.bones) do l.Visible = false end
 end
-players.PlayerRemoving:Connect(function(p) local e = espPool[p] if e then hideEsp(e) end end)
+cleanup.conns[#cleanup.conns+1] = players.PlayerRemoving:Connect(function(p) local e = espPool[p] if e then hideEsp(e) end end)
 
 local SKELETON = {
 	{"Head","UpperTorso"},{"UpperTorso","LowerTorso"},{"LowerTorso","RootPart"},
@@ -383,6 +494,7 @@ local function chamsFor(mdl)
 	if not ok then return nil end
 	h.FillTransparency = 0.5 h.OutlineTransparency = 0
 	h.Adornee = mdl h.Parent = chamsParent
+	cleanup.insts[#cleanup.insts+1] = h
 	chams[mdl] = h
 	return h
 end
@@ -390,14 +502,14 @@ end
 ---------------------------------------------------------------- camera aim key tracking
 
 local camHeld = false
-uis.InputBegan:Connect(function(i, gpe)
+cleanup.conns[#cleanup.conns+1] = uis.InputBegan:Connect(function(i, gpe)
 	if gpe then return end
 	local k = flag("cam_key", "M2")
 	if k == "M2" and i.UserInputType == Enum.UserInputType.MouseButton2 then camHeld = true end
 	if k == "M1" and i.UserInputType == Enum.UserInputType.MouseButton1 then camHeld = true end
 	if i.KeyCode ~= Enum.KeyCode.Unknown and i.KeyCode.Name == k then camHeld = true end
 end)
-uis.InputEnded:Connect(function(i)
+cleanup.conns[#cleanup.conns+1] = uis.InputEnded:Connect(function(i)
 	local k = flag("cam_key", "M2")
 	if k == "M2" and i.UserInputType == Enum.UserInputType.MouseButton2 then camHeld = false end
 	if k == "M1" and i.UserInputType == Enum.UserInputType.MouseButton1 then camHeld = false end
@@ -408,9 +520,10 @@ end)
 
 local fovCircle = Drawing.new("Circle")
 fovCircle.Thickness = 1 fovCircle.Filled = false fovCircle.Visible = false fovCircle.Color = Color3.new(1,1,1)
+cleanup.draws[#cleanup.draws+1] = fovCircle
 
 local maintT = 0
-run.RenderStepped:Connect(function(dt)
+cleanup.conns[#cleanup.conns+1] = run.RenderStepped:Connect(function(dt)
 	local cam = workspace.CurrentCamera
 	local m2 = Vector2.new(mouse.X, mouse.Y)
 	fovCircle.Visible = flag("aim_on", false)
@@ -470,28 +583,49 @@ run.RenderStepped:Connect(function(dt)
 				if head and not visible(head) then hideEsp(e) continue end
 			end
 			local col = friendly(p) and Color3.new(0.4,1,0.4) or Color3.new(1,0.35,0.35)
-			local scale = math.clamp(1200 / z, 0.3, 6)
-			local w, h = 34 * scale, 52 * scale
+			local topY, botY = sp.Y, sp.Y
+			if mdl then
+				local head = mdl:FindFirstChild("Head")
+				local lowest = nil
+				for _, d in ipairs(mdl:GetDescendants()) do
+					if d:IsA("BasePart") and (d.Name:find("Foot") or d.Name == "RootPart" or d.Name == "LowerTorso") then
+						if not lowest or d.Position.Y < lowest.Position.Y then lowest = d end
+					end
+				end
+				local sTop = head and wts(head.Position + Vector3.new(0, head.Size.Y * 0.7, 0))
+				local sBot = lowest and wts(lowest.Position - Vector3.new(0, lowest.Size.Y * 0.6, 0))
+				if sTop and sBot then
+					topY = math.min(sTop.Y, sBot.Y)
+					botY = math.max(sTop.Y, sBot.Y)
+				end
+			else
+				local sTop = wts(pos + Vector3.new(0, 2.7, 0))
+				local sBot = wts(pos - Vector3.new(0, 3, 0))
+				topY = math.min(sTop.Y, sBot.Y)
+				botY = math.max(sTop.Y, sBot.Y)
+			end
+			local h = math.clamp(botY - topY, 14, 700)
+			local w = h * 0.62
 			if flag("esp_box", true) then
 				e.box.Visible = true e.box.Color = col
 				e.box.Size = Vector2.new(w, h)
-				e.box.Position = Vector2.new(sp.X - w/2, sp.Y - h*0.6)
+				e.box.Position = Vector2.new(sp.X - w/2, topY)
 			else e.box.Visible = false end
 			if flag("esp_name", true) then
 				e.name.Visible = true e.name.Color = col
 				e.name.Text = p.Name
-				e.name.Position = Vector2.new(sp.X, sp.Y - h*0.6 - 14)
+				e.name.Position = Vector2.new(sp.X, topY - 14)
 			else e.name.Visible = false end
 			if flag("esp_health", true) and hp then
 				e.health.Visible = true
 				e.health.Color = hp <= 0 and Color3.new(0.4,0.4,0.4) or Color3.new(1 - hp/150, math.clamp(hp/120,0,1), 0.2)
 				e.health.Text = string.format("%d", math.floor(hp + 0.5))
-				e.health.Position = Vector2.new(sp.X + w/2 + 12, sp.Y - h*0.3)
+				e.health.Position = Vector2.new(sp.X + w/2 + 12, topY + h*0.3)
 			else e.health.Visible = false end
 			if flag("esp_dist", true) then
 				e.dist.Visible = true e.dist.Color = col
 				e.dist.Text = string.format("[%dm]", math.floor(z))
-				e.dist.Position = Vector2.new(sp.X, sp.Y + h*0.4)
+				e.dist.Position = Vector2.new(sp.X, botY + 4)
 			else e.dist.Visible = false end
 			-- skeleton
 			if flag("esp_skeleton", false) and mdl then
@@ -499,10 +633,10 @@ run.RenderStepped:Connect(function(dt)
 					local l = e.bones[i]
 					local a = mdl:FindFirstChild(bone[1])
 					local b = mdl:FindFirstChild(bone[2])
-					if a and b then
-						local sa, oa = wts(a.Position)
-						local sb, ob = wts(b.Position)
-						if oa and ob then
+					if a and b and (a.Position - b.Position).Magnitude < 7 and (a.Position - pos).Magnitude < 150 then
+						local sa, oa, za = wts(a.Position)
+						local sb, ob, zb = wts(b.Position)
+						if oa and ob and za > 0 and zb > 0 then
 							l.Visible = true l.Color = col
 							l.From = sa l.To = sb
 						else l.Visible = false end
